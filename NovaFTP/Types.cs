@@ -6,11 +6,7 @@ using System.Threading.Tasks;
 
 namespace NovaFTP
 {
-    class Program
-    {
-        static void Main(string[] args)
-        {
-
-        }
-    }
+    public enum TypeCode { ASCII, Image, EBCDIC, Local }
+    public enum ConnectionType { Active, Passive }
+    public enum Protocol { C, P }
 }

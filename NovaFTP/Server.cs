@@ -6,6 +6,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace NovaFTP
@@ -16,6 +17,7 @@ namespace NovaFTP
         static void Main(string[] args)
         {
             UserManager.LoadUsers("User.xml");
+            Logger.StartLogger(DateTime.Now.ToString("yyyy-MM-dd") + ".txt", true);
 
             // Explicit and Unencrypted Connections
             TcpListener Explicit = new TcpListener(IPAddress.Any, 21);
@@ -27,25 +29,33 @@ namespace NovaFTP
             Implicit.Start();
             Implicit.BeginAcceptTcpClient(AcceptImplicit, Implicit);
 
-            Console.ReadLine();
+            while (true) { Thread.Sleep(10); }
         }
 
         private static void AcceptExplicit(IAsyncResult ar)
         {
-            TcpListener ex = (TcpListener)ar.AsyncState;
-            TcpClient client = ex.EndAcceptTcpClient(ar);
-            ex.BeginAcceptTcpClient(AcceptExplicit, ex);
+            try
+            {
+                TcpListener ex = (TcpListener)ar.AsyncState;
+                TcpClient client = ex.EndAcceptTcpClient(ar);
+                ex.BeginAcceptTcpClient(AcceptExplicit, ex);
 
-            ClientConnection c = new ClientConnection(client, X509, false);
+                ClientConnection c = new ClientConnection(client, X509, false);
+            }
+            catch { }
         }
 
         private static void AcceptImplicit(IAsyncResult ar)
         {
-            TcpListener im = (TcpListener)ar.AsyncState;
-            TcpClient client = im.EndAcceptTcpClient(ar);
-            im.BeginAcceptTcpClient(AcceptImplicit, im);
+            try
+            {
+                TcpListener im = (TcpListener)ar.AsyncState;
+                TcpClient client = im.EndAcceptTcpClient(ar);
+                im.BeginAcceptTcpClient(AcceptImplicit, im);
 
-            ClientConnection c = new ClientConnection(client, X509, true);
+                ClientConnection c = new ClientConnection(client, X509, true);
+            }
+            catch { }
         }
     }
 }

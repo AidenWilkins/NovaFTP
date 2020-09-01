@@ -50,6 +50,8 @@
     <Compile Include="FixedSslStream\ReflectUtil.cs" />
     <Compile Include="FixedSslStream\SslDirectCall.cs" />
     <Compile Include="Helpers.cs" />
+    <Compile Include="Logger.cs" />
+    <Compile Include="LogUser.cs" />
     <Compile Include="Server.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="Types.cs" />

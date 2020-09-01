@@ -17,10 +17,10 @@ namespace NovaFTP
     public class ClientConnection
     {
         #region Connection Related
-        private TcpClient Client;
+        private readonly TcpClient Client;
 
         // Control Connection
-        private NetworkStream ControlStream;
+        private readonly NetworkStream ControlStream;
         private FixedSslStream SslControlStream;
         private StreamReader ControlReader;
         private StreamWriter ControlWriter;
@@ -29,7 +29,6 @@ namespace NovaFTP
         private TcpListener DataPassive;
         private TcpClient DataActive;
         private IPEndPoint ActiveEP;
-        private StreamReader DataReader;
         private StreamWriter DataWriter;
 
         // Connection Type's
@@ -38,18 +37,19 @@ namespace NovaFTP
         private Protocol Protocol;
 
         // Other Connection Options
-        private bool UseImplicit;
-        private X509Certificate2 X509;
+        private readonly bool UseImplicit;
+        private readonly X509Certificate2 X509;
         #endregion
 
         // User Related
         private string Username;
         private string Root;
         private string CurrentDir;
+        private LogUser user;
+        private bool LoggedIn;
 
         // Storage
         private string renameFrom;
-
         
         public ClientConnection(TcpClient client, X509Certificate2 x509, bool useImplicit)
         {
@@ -58,6 +58,10 @@ namespace NovaFTP
             UseImplicit = useImplicit;
 
             ControlStream = Client.GetStream();
+
+            user = new LogUser();
+            Logger.RegisterUser(user);
+            LoggedIn = false;
 
             if (UseImplicit)
             {
@@ -78,82 +82,176 @@ namespace NovaFTP
 
         private void HandleControl(object state)
         {
-            ControlWriter.WriteLine("220 Ready As I'll Ever Be");
-            ControlWriter.Flush();
-
-            string line = null;
-
-            while (!string.IsNullOrEmpty(line = ControlReader.ReadLine()))
+            try
             {
-                string response = null;
-                bool authTls = false;
+                user.Address = Client.Client.RemoteEndPoint.ToString();
+                user.LogMsg($"220 Ready As I'll Ever Be");
+                ControlWriter.WriteLine("220 Ready As I'll Ever Be");
+                ControlWriter.Flush();
 
-                string[] command = line.Split(' ');
-                string cmd = command[0].ToUpperInvariant();
-                string args = command.Length > 1 ? line.Substring(command[0].Length + 1) : null;
+                string line = null;
 
-                if (response == null)
+                while (!string.IsNullOrEmpty(line = ControlReader.ReadLine()))
                 {
-                    switch (cmd)
+                    user.LogMsg($"Command: {line}");
+                    string response = null;
+                    bool authTls = false;
+
+                    string[] command = line.Split(' ');
+                    string cmd = command[0].ToUpperInvariant();
+                    string args = command.Length > 1 ? line.Substring(command[0].Length + 1) : null;
+
+                    if (response == null)
                     {
-                        case "USER":
-                        case "PASS":
-                            response = Login(args);
-                            break;
-                        case "AUTH":
-                            if (args == "TLS" || args == "SSL")
-                            {
-                                response = "234 Enable TLS/SSL Connection";
-                                authTls = true;
+                        switch (cmd)
+                        {
+                            case "USER":
+                                if (LoggedIn)
+                                {
+                                    response = "230 User already logged in";
+                                    break;
+                                }
+                                response = Login(args);
                                 break;
-                            }
-                            response = $"502 Unknown Argument '{args}'";
-                            break;
-                        // File Commands
-                        case "CDUP":
-                            response = ChangeWD("..");
-                            break;
-                        case "CWD":
-                            response = ChangeWD(args);
-                            break;
-                        case "PWD":
-                            string cur = CurrentDir.Replace(Root, string.Empty).Replace('\\', '/');
-                            response = cur.Length > 0 ? cur : "/";
-                            break;
-                        case "TYPE":
-                            string[] splitArgs = args.Split(' ');
-                            response = Type(splitArgs[0], splitArgs.Length > 1 ? splitArgs[1] : null);
-                            break;
-                        case "PASV":
-                            response = Passive();
-                            break;
-                        case "LIST":
-                            response = List(args ?? CurrentDir);
-                            break;
-                        case "RETR":
-                            response = Retrieve(args);
-                            break;
-                        default:
-                            response = $"502 Command '{line}' Not Implemented";
-                            break;
-                    }
+                            case "PASS":
+                                response = Login(args);
+                                break;
+                            case "AUTH":
+                                if (args == "TLS" || args == "SSL")
+                                {
+                                    response = "234 Enable TLS/SSL Connection";
+                                    authTls = true;
+                                    break;
+                                }
+                                response = $"502 Unknown Argument '{args}'";
+                                break;
+                            // File Commands
+                            case "CDUP":
+                                response = ChangeWD("..");
+                                break;
+                            case "CWD":
+                                response = ChangeWD(args);
+                                break;
+                            case "PWD":
+                                try
+                                {
+                                    string cur = CurrentDir.Replace(Root, string.Empty).Replace('\\', '/');
+                                    response = cur.Length > 0 ? cur : "257 \"/\" is current directory";
+                                }
+                                catch 
+                                {
+                                    response = "550 PWD Failed Sucessfully";
+                                }
+                                break;
+                            case "TYPE":
+                                string[] splitArgs = args.Split(' ');
+                                response = Type(splitArgs[0], splitArgs.Length > 1 ? splitArgs[1] : null);
+                                break;
+                            case "PASV":
+                                response = Passive();
+                                break;
+                            case "PORT":
+                                response = Port(args);
+                                break;
+                            case "LIST":
+                                response = List(args ?? CurrentDir);
+                                break;
+                            case "RETR":
+                                response = Retrieve(args);
+                                break;
+                            case "STOR":
+                                response = Store(args);
+                                break;
+                            case "RNFR":
+                                renameFrom = args;
+                                response = "350 Requested file action pending further information";
+                                break;
+                            case "RNTO":
+                                response = Rename(renameFrom, args);
+                                break;
+                            case "PBSZ":
+                                response = $"200 PBSZ={args}";
+                                break;
+                            case "PROT":
+                                response = $"200 Protection level set to {args}";
+                                Protocol = (args == "P") ? Protocol.P : Protocol.C;
+                                break;
+                            case "MLSD":
+                                response = MLSD(args);
+                                break;
+                            case "NLSD":
+                                response = NLST(args);
+                                break;
+                            case "SIZE":
+                                args = Helpers.NormalizeFilename(args, Root, CurrentDir);
+                                if (!Helpers.IsValidPath(args, Root))
+                                {
+                                    response = "550 File Not Found";
+                                    break;
+                                }
+                                response = (File.Exists(args)) ? $"213 {new FileInfo(args).Length}" : "550 File Not Found";
+                                break;
+                            case "MDTM":
+                                args = Helpers.NormalizeFilename(args, Root, CurrentDir);
+                                if (!Helpers.IsValidPath(args, Root))
+                                {
+                                    response = "550 File Not Found";
+                                    break;
+                                }
+                                response = (File.Exists(args)) ? $"213 {new FileInfo(args).LastWriteTime:yyyyMMddHHmmss.fff}" : "550 File Not Found";
+                                break;
+                            case "QUIT":
+                                response = "221 Goodbye";
+                                break;
+                            case "DELE":
+                                response = Delete(args);
+                                break;
+                            case "RMD":
+                                response = RemoveDir(args);
+                                break;
+                            case "MKD":
+                                response = CreateDir(args);
+                                break;
+                            case "SYST":
+                                response = "215 UNIX Type: L8";
+                                break;
+                            default:
+                                response = $"502 Command '{line}' Not Implemented";
+                                break;
+                        }
 
-                    ControlWriter.WriteLine(response);
-                    ControlWriter.Flush();
+                        try
+                        {
+                            user.LogMsg($"Response: {response}");
+                            ControlWriter.WriteLine(response);
+                            ControlWriter.Flush();
+                        }
+                        catch { }
 
-                    if (response.StartsWith("221"))
-                    {
-                        Client.Close();
-                        break;
-                    }
-                    if (authTls)
-                    {
-                        SslControlStream = new FixedSslStream(ControlStream);
-                        SslControlStream.AuthenticateAsServer(X509, false, SslProtocols.Default, false);
-                        ControlWriter = new StreamWriter(SslControlStream);
-                        ControlReader = new StreamReader(SslControlStream);
+                        if (response.StartsWith("221"))
+                        {
+                            if (SslControlStream != null)
+                                SslControlStream.Dispose();
+                            Client.Close();
+                            break;
+                        }
+
+                        if (authTls)
+                        {
+                            SslControlStream = new FixedSslStream(ControlStream);
+                            SslControlStream.AuthenticateAsServer(X509, false, SslProtocols.Default, false);
+                            ControlWriter = new StreamWriter(SslControlStream);
+                            ControlReader = new StreamReader(SslControlStream);
+                        }
                     }
                 }
+                Logger.UnregisterUser(user);
+            }
+            catch (Exception e)
+            {
+                Logger.Log($"Client {Client.Client.RemoteEndPoint} disconnected due to an error ({e.Message})");
+                Client.Close();
+                Logger.UnregisterUser(user);
             }
         }
 
@@ -164,9 +262,10 @@ namespace NovaFTP
                 if (UserManager.UserExsits(args)) 
                 {
                     Username = args;
+                    user.Name = Username;
                     return "331 Username ok, need password";
                 }
-                return $"530 Username {args} doesn't exsite";
+                return $"530 Username {args} doesn't exist";
             }
             else
             {
@@ -175,6 +274,7 @@ namespace NovaFTP
                 {
                     Root = user.RootDirectory;
                     CurrentDir = Root;
+                    LoggedIn = true;
                     return "230 User logged in";
                 }
                 else
@@ -213,6 +313,10 @@ namespace NovaFTP
                     {
                         CurrentDir = Root;
                     }
+                }
+                else if (File.Exists(newDir))
+                {
+                    return $"550 CWD failed. \"{newDir}\": directory not found.";
                 }
                 else
                 {
@@ -284,20 +388,37 @@ namespace NovaFTP
             if (pathname == null)
                 pathname = string.Empty;
 
-            pathname = new DirectoryInfo(Path.Combine(CurrentDir, pathname)).FullName;
+            string intPathname = new DirectoryInfo(Path.Combine(CurrentDir, pathname)).FullName;
 
-            if (pathname.StartsWith(Root))
+            if (Helpers.IsValidPath(intPathname, Root))
             {
                 if(DataConnectionType == ConnectionType.Active)
                 {
                     DataActive = new TcpClient(ActiveEP.AddressFamily);
-                    DataActive.BeginConnect(ActiveEP.Address, ActiveEP.Port, HandleList, pathname);
+                    DataActive.BeginConnect(ActiveEP.Address, ActiveEP.Port, HandleList, intPathname);
                 }
                 else
                 {
-                    DataPassive.BeginAcceptTcpClient(HandleList, pathname);
+                    DataPassive.BeginAcceptTcpClient(HandleList, intPathname);
                 }
                 return $"150 Opening {DataConnectionType} mode data transfer for LIST";
+            }
+            else
+            {
+                intPathname = new DirectoryInfo(Helpers.NormalizeFilename(pathname, Root, CurrentDir)).FullName;
+                if (Helpers.IsValidPath(intPathname, Root))
+                {
+                    if (DataConnectionType == ConnectionType.Active)
+                    {
+                        DataActive = new TcpClient(ActiveEP.AddressFamily);
+                        DataActive.BeginConnect(ActiveEP.Address, ActiveEP.Port, HandleList, intPathname);
+                    }
+                    else
+                    {
+                        DataPassive.BeginAcceptTcpClient(HandleList, intPathname);
+                    }
+                    return string.Format("150 Opening {0} mode data transfer for MLSD", DataConnectionType);
+                }
             }
             return $"450 Requested action on '{pathname}' not taken";
         }
@@ -307,21 +428,18 @@ namespace NovaFTP
             pathname = Helpers.NormalizeFilename(pathname, Root, CurrentDir);
             if(Helpers.IsValidPath(pathname, Root))
             {
-                if(DataConnectionType == ConnectionType.Active)
+                if (DataConnectionType == ConnectionType.Active)
                 {
-                    if (DataConnectionType == ConnectionType.Active)
-                    {
-                        DataActive = new TcpClient(ActiveEP.AddressFamily);
-                        DataActive.BeginConnect(ActiveEP.Address, ActiveEP.Port, HandleList, pathname);
-                    }
-                    else
-                    {
-                        DataPassive.BeginAcceptTcpClient(HandleRetr, pathname);
-                    }
-                    return $"250 Opening {DataConnectionType} mode for data transfer for RETR";
+                    DataActive = new TcpClient(ActiveEP.AddressFamily);
+                    DataActive.BeginConnect(ActiveEP.Address, ActiveEP.Port, HandleRetr, pathname);
                 }
+                else
+                {
+                    DataPassive.BeginAcceptTcpClient(HandleRetr, pathname);
+                }
+                return $"150 Opening {DataConnectionType} mode for data transfer for RETR";
             }
-            return "550 Error retrieving file";
+            return $"550 Error retrieving file {pathname}";
         }
 
         private string Store(string pathname)
@@ -335,16 +453,181 @@ namespace NovaFTP
                     if (DataConnectionType == ConnectionType.Active)
                     {
                         DataActive = new TcpClient(ActiveEP.AddressFamily);
-                        DataActive.BeginConnect(ActiveEP.Address, ActiveEP.Port, HandleList, pathname);
+                        DataActive.BeginConnect(ActiveEP.Address, ActiveEP.Port, HandleStor, pathname);
                     }
                     else
                     {
                         DataPassive.BeginAcceptTcpClient(HandleStor, pathname);
                     }
-                    return $"250 Opening {DataConnectionType} mode for data transfer for STOR";
+                    return $"150 Opening {DataConnectionType} mode for data transfer for STOR";
                 }
             }
             return "550 Error storing file";
+        }
+
+        private string Rename(string renameFrom, string renameTo)
+        {
+            if (string.IsNullOrWhiteSpace(renameFrom) || string.IsNullOrWhiteSpace(renameTo))
+            {
+                return "450 Requested file action not taken";
+            }
+
+            renameFrom = Helpers.NormalizeFilename(renameFrom, Root, CurrentDir);
+            renameTo = Helpers.NormalizeFilename(renameTo, Root, CurrentDir);
+
+            if(renameFrom != null && renameTo != null)
+            {
+                if (File.Exists(renameFrom))
+                {
+                    File.Move(renameFrom, renameTo);
+                }
+                else if (Directory.Exists(renameFrom))
+                {
+                    Directory.Move(renameFrom, renameTo);
+                }
+                else
+                {
+                    return "450 Requested file action not taken";
+                }
+                return "250 Requested file action okday, completed";
+            }
+            return "450 Requested file action not taken";
+        }
+
+        private string MLSD(string pathname)
+        {
+            if (pathname == null)
+                pathname = string.Empty;
+
+            string intPathname = new DirectoryInfo(Path.Combine(CurrentDir, pathname)).FullName;
+
+            if (Helpers.IsValidPath(intPathname, Root))
+            {
+                if (DataConnectionType == ConnectionType.Active)
+                {
+                    DataActive = new TcpClient(ActiveEP.AddressFamily);
+                    DataActive.BeginConnect(ActiveEP.Address, ActiveEP.Port, HandleMLSD, intPathname);
+                }
+                else
+                {
+                    DataPassive.BeginAcceptTcpClient(HandleMLSD, intPathname);
+                }
+                return $"150 Opening {DataConnectionType} mode data transfer for LIST";
+            }
+            else
+            {
+                intPathname = new DirectoryInfo(Helpers.NormalizeFilename(pathname, Root, CurrentDir)).FullName;
+                if (Helpers.IsValidPath(intPathname, Root))
+                {
+                    if (DataConnectionType == ConnectionType.Active)
+                    {
+                        DataActive = new TcpClient(ActiveEP.AddressFamily);
+                        DataActive.BeginConnect(ActiveEP.Address, ActiveEP.Port, HandleMLSD, intPathname);
+                    }
+                    else
+                    {
+                        DataPassive.BeginAcceptTcpClient(HandleMLSD, intPathname);
+                    }
+                    return string.Format("150 Opening {0} mode data transfer for MLSD", DataConnectionType);
+                }
+            }
+            return $"450 Requested action on '{pathname}' not taken";
+        }
+
+        private string Delete(string pathname)
+        {
+            pathname = Helpers.NormalizeFilename(pathname, Root, CurrentDir);
+            if (Helpers.IsValidPath(pathname, Root))
+            {
+                if (File.Exists(pathname))
+                {
+                    File.Delete(pathname);
+                    return string.Format("250 File Deleted Successfully");
+                }
+            }
+            return "550 File Not Found";
+        }
+
+        private string Port(string args)
+        {
+            string[] ipAndPort = args.Split(',');
+
+            byte[] ipAddress = new byte[4];
+            byte[] port = new byte[2];
+
+            for (int i = 0; i < 4; i++)
+            {
+                ipAddress[i] = Convert.ToByte(ipAndPort[i]);
+            }
+
+            for (int i = 4; i < 6; i++)
+            {
+                port[i - 4] = Convert.ToByte(ipAndPort[i]);
+            }
+
+            if (BitConverter.IsLittleEndian)
+                Array.Reverse(port);
+
+            ActiveEP = new IPEndPoint(new IPAddress(ipAddress), BitConverter.ToInt16(port, 0));
+
+            return "200 Data Connection Established";
+        }
+
+        private string RemoveDir(string pathname)
+        {
+            pathname = Helpers.NormalizeFilename(pathname, Root, CurrentDir);
+            if(pathname == null)
+                return "550 Unable to complete request";
+            if (Helpers.IsValidPath(pathname, Root))
+            {
+                if (Directory.Exists(pathname))
+                {
+                    Directory.Delete(pathname);
+                    return "250 Requested file action okay, completed";
+                }
+            }
+            return "550 Directory Not Found";
+        }
+
+        private string CreateDir(string pathname)
+        {
+            pathname = Helpers.NormalizeFilename(pathname, Root, CurrentDir);
+            if (pathname == null)
+                return "550 Unable to complete request";
+            if (Helpers.IsValidPath(pathname, Root))
+            {
+                if (!Directory.Exists(pathname))
+                {
+                    Directory.CreateDirectory(pathname);
+                    return "250 Requested file action okay, completed";
+                }
+            }
+            return "550 Directory already exists or path is invalid";
+        }
+
+        private string NLST(string pathname)
+        {
+            if (pathname == null)
+            {
+                pathname = string.Empty;
+            }
+
+            pathname = new DirectoryInfo(Path.Combine(CurrentDir, pathname)).FullName;
+
+            if (Helpers.IsValidPath(pathname, Root))
+            {
+                if (DataConnectionType == ConnectionType.Active)
+                {
+                    DataActive = new TcpClient(ActiveEP.AddressFamily);
+                    DataActive.BeginConnect(ActiveEP.Address, ActiveEP.Port, HandleNLST, pathname);
+                }
+                else
+                {
+                    DataPassive.BeginAcceptTcpClient(HandleNLST, pathname);
+                }
+                return string.Format("150 Opening {0} mode data transfer for MLSD", DataConnectionType);
+            }
+            return "450 Requested file action not taken";
         }
 
         // Handlers
@@ -360,6 +643,7 @@ namespace NovaFTP
             }
 
             string pathname = (string)ar.AsyncState;
+            pathname = pathname.Replace("-l", "").Replace("-a", "");
 
             FixedSslStream ssl = null;
             NetworkStream stream = null;
@@ -368,13 +652,11 @@ namespace NovaFTP
             {
                 ssl = new FixedSslStream(DataActive.GetStream());
                 ssl.AuthenticateAsServer(X509, false, SslProtocols.Default, false);
-                DataReader = new StreamReader(ssl, Encoding.ASCII);
                 DataWriter = new StreamWriter(ssl, Encoding.ASCII);
             }
             else
             {
                 stream = DataActive.GetStream();
-                DataReader = new StreamReader(stream, Encoding.ASCII);
                 DataWriter = new StreamWriter(stream, Encoding.ASCII);
             }
 
@@ -407,61 +689,78 @@ namespace NovaFTP
             DataActive.Close();
             DataActive = null;
 
+            user.LogMsg("226 List complete");
             ControlWriter.WriteLine("226 List complete");
             ControlWriter.Flush();
         }
 
         private void HandleRetr(IAsyncResult ar)
         {
-            if (DataConnectionType == ConnectionType.Active)
+            try
             {
-                DataActive.EndConnect(ar);
-            }
-            else
-            {
-                DataActive = DataPassive.EndAcceptTcpClient(ar);
-            }
-
-            string pathname = (string)ar.AsyncState;
-
-            FixedSslStream ssl = null;
-            NetworkStream stream = null;
-
-            if (Protocol == Protocol.P || UseImplicit)
-            {
-                ssl = new FixedSslStream(DataActive.GetStream());
-                ssl.AuthenticateAsServer(X509, false, SslProtocols.Default, false);
-                DataReader = new StreamReader(ssl, Encoding.ASCII);
-                DataWriter = new StreamWriter(ssl, Encoding.ASCII);
-
-                using (FileStream fs = new FileStream(pathname, FileMode.Open, FileAccess.Read))
+                if (DataConnectionType == ConnectionType.Active)
                 {
-                    CopyStream(fs, ssl);
+                    DataActive.EndConnect(ar);
                 }
-            }
-            else
-            {
-                stream = DataActive.GetStream();
-                DataReader = new StreamReader(stream, Encoding.ASCII);
-                DataWriter = new StreamWriter(stream, Encoding.ASCII);
-
-                using (FileStream fs = new FileStream(pathname, FileMode.Open, FileAccess.Read))
+                else
                 {
-                    CopyStream(fs, stream);
+                    DataActive = DataPassive.EndAcceptTcpClient(ar);
                 }
+
+                string pathname = (string)ar.AsyncState;
+
+                FixedSslStream ssl = null;
+                NetworkStream stream = null;
+
+                if (Protocol == Protocol.P || UseImplicit)
+                {
+                    ssl = new FixedSslStream(DataActive.GetStream());
+                    ssl.AuthenticateAsServer(X509, false, SslProtocols.Default, false);
+                    DataWriter = new StreamWriter(ssl, Encoding.ASCII);
+
+                    using (FileStream fs = new FileStream(pathname, FileMode.Open, FileAccess.Read))
+                    {
+                        CopyStream(fs, ssl);
+                    }
+                }
+                else
+                {
+                    stream = DataActive.GetStream();
+                    DataWriter = new StreamWriter(stream, Encoding.ASCII);
+
+                    using (FileStream fs = new FileStream(pathname, FileMode.Open, FileAccess.Read))
+                    {
+                        CopyStream(fs, stream);
+                    }
+                }
+
+                if (ssl != null)
+                    ssl.Dispose();
+
+                if (stream != null)
+                    stream.Dispose();
+
+                DataActive.Close();
+                DataActive = null;
+
+                try
+                {
+                    user.LogMsg("226 Closing data connection, file transfer successful");
+                    ControlWriter.WriteLine("226 Closing data connection, file transfer successful");
+                    ControlWriter.Flush();
+                }
+                catch { }
             }
-
-            if (ssl != null)
-                ssl.Dispose();
-
-            if (stream != null)
-                stream.Dispose();
-
-            DataActive.Close();
-            DataActive = null;
-
-            ControlWriter.WriteLine("226 Closing data connection, file transfer successful");
-            ControlWriter.Flush();
+            catch
+            {
+                try
+                {
+                    user.LogMsg("550 Closing data connection, file transfer failed successfully");
+                    ControlWriter.WriteLine("550 Closing data connection, file transfer failed successfully");
+                    ControlWriter.Flush();
+                }
+                catch { }
+            }
         }
 
         private void HandleStor(IAsyncResult ar)
@@ -484,7 +783,6 @@ namespace NovaFTP
             {
                 ssl = new FixedSslStream(DataActive.GetStream());
                 ssl.AuthenticateAsServer(X509, false, SslProtocols.Default, false);
-                DataReader = new StreamReader(ssl, Encoding.ASCII);
                 DataWriter = new StreamWriter(ssl, Encoding.ASCII);
 
                 using (FileStream fs = new FileStream(pathname, FileMode.Open, FileAccess.Read))
@@ -495,7 +793,6 @@ namespace NovaFTP
             else
             {
                 stream = DataActive.GetStream();
-                DataReader = new StreamReader(stream, Encoding.ASCII);
                 DataWriter = new StreamWriter(stream, Encoding.ASCII);
 
                 using (FileStream fs = new FileStream(pathname, FileMode.Open, FileAccess.Read))
@@ -513,7 +810,129 @@ namespace NovaFTP
             DataActive.Close();
             DataActive = null;
 
+            user.LogMsg("226 Closing data connection, file transfer successful");
             ControlWriter.WriteLine("226 Closing data connection, file transfer successful");
+            ControlWriter.Flush();
+        }
+
+        private void HandleMLSD(IAsyncResult ar)
+        {
+            if (DataConnectionType == ConnectionType.Active)
+            {
+                DataActive.EndConnect(ar);
+            }
+            else
+            {
+                DataActive = DataPassive.EndAcceptTcpClient(ar);
+            }
+
+            string pathname = (string)ar.AsyncState;
+
+            FixedSslStream ssl = null;
+            NetworkStream stream = null;
+
+            if (Protocol == Protocol.P)
+            {
+                ssl = new FixedSslStream(DataActive.GetStream());
+                ssl.AuthenticateAsServer(X509, false, SslProtocols.Default, false);
+                DataWriter = new StreamWriter(ssl, Encoding.ASCII);
+            }
+            else
+            {
+                stream = DataActive.GetStream();
+                DataWriter = new StreamWriter(stream, Encoding.ASCII);
+            }
+
+            IEnumerable<string> directories = Directory.EnumerateDirectories(pathname);
+            foreach (string dir in directories)
+            {
+                DirectoryInfo d = new DirectoryInfo(dir);
+                string date = d.LastWriteTime.ToString("yyyyMMddHHmmss");
+                string line = $"type=cdir;modify={date};perm=el; {d.Name}";
+
+                DataWriter.WriteLine(line);
+                DataWriter.Flush();
+            }
+
+            IEnumerable<string> files = Directory.EnumerateFiles(pathname);
+
+            foreach (string file in files)
+            {
+                FileInfo f = new FileInfo(file);
+
+                string date = f.LastWriteTime.ToString("yyyyMMddHHmmss");
+
+                string line = $"type=file;size={f.Length};modify={date};perm=r; {f.Name}";
+
+                DataWriter.WriteLine(line);
+                DataWriter.Flush();
+            }
+
+            ssl.Dispose();
+
+            DataActive.Close();
+            DataActive = null;
+
+            user.LogMsg("226 MLSD complete");
+            ControlWriter.WriteLine("226 MLSD complete");
+            ControlWriter.Flush();
+        }
+
+        private void HandleNLST(IAsyncResult ar)
+        {
+            if (DataConnectionType == ConnectionType.Active)
+            {
+                DataActive.EndConnect(ar);
+            }
+            else
+            {
+                DataActive = DataPassive.EndAcceptTcpClient(ar);
+            }
+
+            string pathname = (string)ar.AsyncState;
+
+            FixedSslStream ssl = null;
+            NetworkStream stream = null;
+
+            if (Protocol == Protocol.P)
+            {
+                ssl = new FixedSslStream(DataActive.GetStream());
+                ssl.AuthenticateAsServer(X509, false, SslProtocols.Default, false);
+                DataWriter = new StreamWriter(ssl, Encoding.ASCII);
+            }
+            else
+            {
+                stream = DataActive.GetStream();
+                DataWriter = new StreamWriter(stream, Encoding.ASCII);
+            }
+
+            IEnumerable<string> directories = Directory.EnumerateDirectories(pathname);
+            foreach (string dir in directories)
+            {
+                DirectoryInfo d = new DirectoryInfo(dir);
+                string line = d.Name;
+
+                DataWriter.WriteLine(line);
+                DataWriter.Flush();
+            }
+
+            IEnumerable<string> files = Directory.EnumerateFiles(pathname);
+            foreach (string file in files)
+            {
+                FileInfo f = new FileInfo(file);
+                string line = f.Name;
+
+                DataWriter.WriteLine(line);
+                DataWriter.Flush();
+            }
+
+            ssl.Dispose();
+
+            DataActive.Close();
+            DataActive = null;
+
+            user.LogMsg("226 NLST complete");
+            ControlWriter.WriteLine("226 NLST complete");
             ControlWriter.Flush();
         }
 

@@ -57,6 +57,7 @@
     <Compile Include="Types.cs" />
     <Compile Include="UserInfo.cs" />
     <Compile Include="UserManager.cs" />
+    <Compile Include="VirtualDirectory.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />

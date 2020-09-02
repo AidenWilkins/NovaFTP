@@ -1,5 +1,4 @@
 ﻿using FixedSslLib;
-using FtpServer;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -11,6 +10,7 @@ using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Windows.Markup;
 
 namespace NovaFTP
 {
@@ -45,7 +45,8 @@ namespace NovaFTP
         private string Username;
         private string Root;
         private string CurrentDir;
-        private LogUser user;
+        private LogUser LogUser;
+        private UserInfo User;
         private bool LoggedIn;
 
         // Storage
@@ -59,8 +60,8 @@ namespace NovaFTP
 
             ControlStream = Client.GetStream();
 
-            user = new LogUser();
-            Logger.RegisterUser(user);
+            LogUser = new LogUser();
+            Logger.RegisterUser(LogUser);
             LoggedIn = false;
 
             if (UseImplicit)
@@ -84,8 +85,8 @@ namespace NovaFTP
         {
             try
             {
-                user.Address = Client.Client.RemoteEndPoint.ToString();
-                user.LogMsg($"220 Ready As I'll Ever Be");
+                LogUser.Address = Client.Client.RemoteEndPoint.ToString();
+                LogUser.LogMsg($"220 Ready As I'll Ever Be");
                 ControlWriter.WriteLine("220 Ready As I'll Ever Be");
                 ControlWriter.Flush();
 
@@ -93,7 +94,7 @@ namespace NovaFTP
 
                 while (!string.IsNullOrEmpty(line = ControlReader.ReadLine()))
                 {
-                    user.LogMsg($"Command: {line}");
+                    LogUser.LogMsg($"Command: {line}");
                     string response = null;
                     bool authTls = false;
 
@@ -222,7 +223,7 @@ namespace NovaFTP
 
                         try
                         {
-                            user.LogMsg($"Response: {response}");
+                            LogUser.LogMsg($"Response: {response}");
                             ControlWriter.WriteLine(response);
                             ControlWriter.Flush();
                         }
@@ -245,13 +246,13 @@ namespace NovaFTP
                         }
                     }
                 }
-                Logger.UnregisterUser(user);
+                Logger.UnregisterUser(LogUser);
             }
             catch (Exception e)
             {
                 Logger.Log($"Client {Client.Client.RemoteEndPoint} disconnected due to an error ({e.Message})");
                 Client.Close();
-                Logger.UnregisterUser(user);
+                Logger.UnregisterUser(LogUser);
             }
         }
 
@@ -262,17 +263,17 @@ namespace NovaFTP
                 if (UserManager.UserExsits(args)) 
                 {
                     Username = args;
-                    user.Name = Username;
+                    LogUser.Name = Username;
                     return "331 Username ok, need password";
                 }
                 return $"530 Username {args} doesn't exist";
             }
             else
             {
-                UserInfo user = UserManager.GetUser(Username);
-                if(args == user.Password)
+                User = UserManager.GetUser(Username);
+                if(args == User.Password)
                 {
-                    Root = user.RootDirectory;
+                    Root = User.Directories.First(x => x.IsRoot == true).Path;
                     CurrentDir = Root;
                     LoggedIn = true;
                     return "230 User logged in";
@@ -317,6 +318,11 @@ namespace NovaFTP
                 else if (File.Exists(newDir))
                 {
                     return $"550 CWD failed. \"{newDir}\": directory not found.";
+                }
+                else if(User.Directories.Any(x => x.Alias == directory.Replace("\\", "")))
+                {
+                    CurrentDir = User.Directories.First(x => x.Alias == directory.Replace("\\", "")).Path;
+                    return "250 Changed to new directory";
                 }
                 else
                 {
@@ -388,24 +394,24 @@ namespace NovaFTP
             if (pathname == null)
                 pathname = string.Empty;
 
-            string intPathname = new DirectoryInfo(Path.Combine(CurrentDir, pathname)).FullName;
-
-            if (Helpers.IsValidPath(intPathname, Root))
+            if (User.Directories.Any(x => x.Alias == Path.Combine(CurrentDir, pathname).Replace("\\", "")))
             {
-                if(DataConnectionType == ConnectionType.Active)
+                VirtualDirectory vd = User.Directories.First(x => x.Alias == Path.Combine(CurrentDir, pathname).Replace("\\", ""));
+                if (DataConnectionType == ConnectionType.Active)
                 {
                     DataActive = new TcpClient(ActiveEP.AddressFamily);
-                    DataActive.BeginConnect(ActiveEP.Address, ActiveEP.Port, HandleList, intPathname);
+                    DataActive.BeginConnect(ActiveEP.Address, ActiveEP.Port, HandleList, vd.Path);
                 }
                 else
                 {
-                    DataPassive.BeginAcceptTcpClient(HandleList, intPathname);
+                    DataPassive.BeginAcceptTcpClient(HandleList, vd.Path);
                 }
                 return $"150 Opening {DataConnectionType} mode data transfer for LIST";
             }
             else
             {
-                intPathname = new DirectoryInfo(Helpers.NormalizeFilename(pathname, Root, CurrentDir)).FullName;
+                string intPathname = new DirectoryInfo(Path.Combine(CurrentDir, pathname)).FullName;
+
                 if (Helpers.IsValidPath(intPathname, Root))
                 {
                     if (DataConnectionType == ConnectionType.Active)
@@ -417,7 +423,24 @@ namespace NovaFTP
                     {
                         DataPassive.BeginAcceptTcpClient(HandleList, intPathname);
                     }
-                    return string.Format("150 Opening {0} mode data transfer for MLSD", DataConnectionType);
+                    return $"150 Opening {DataConnectionType} mode data transfer for LIST";
+                }
+                else
+                {
+                    intPathname = new DirectoryInfo(Helpers.NormalizeFilename(pathname, Root, CurrentDir)).FullName;
+                    if (Helpers.IsValidPath(intPathname, Root))
+                    {
+                        if (DataConnectionType == ConnectionType.Active)
+                        {
+                            DataActive = new TcpClient(ActiveEP.AddressFamily);
+                            DataActive.BeginConnect(ActiveEP.Address, ActiveEP.Port, HandleList, intPathname);
+                        }
+                        else
+                        {
+                            DataPassive.BeginAcceptTcpClient(HandleList, intPathname);
+                        }
+                        return string.Format("150 Opening {0} mode data transfer for MLSD", DataConnectionType);
+                    }
                 }
             }
             return $"450 Requested action on '{pathname}' not taken";
@@ -680,6 +703,21 @@ namespace NovaFTP
                 DataWriter.Flush();
             }
 
+            // Virtual Directories
+            if (pathname == Root)
+            {
+                foreach (VirtualDirectory vd in User.Directories)
+                {
+                    if (vd.IsRoot)
+                        continue;
+                    DirectoryInfo d = new DirectoryInfo(vd.Path);
+                    string line = string.Format("drwxr-xr-x    2 2003     2003     {0,8} {1} {2}", "4096", d.LastWriteTime.ToString("MMM dd  yyyy"), vd.Alias);
+
+                    DataWriter.WriteLine(line);
+                    DataWriter.Flush();
+                }
+            }
+
             if (ssl != null)
                 ssl.Dispose();
 
@@ -689,7 +727,7 @@ namespace NovaFTP
             DataActive.Close();
             DataActive = null;
 
-            user.LogMsg("226 List complete");
+            LogUser.LogMsg("226 List complete");
             ControlWriter.WriteLine("226 List complete");
             ControlWriter.Flush();
         }
@@ -745,7 +783,7 @@ namespace NovaFTP
 
                 try
                 {
-                    user.LogMsg("226 Closing data connection, file transfer successful");
+                    LogUser.LogMsg("226 Closing data connection, file transfer successful");
                     ControlWriter.WriteLine("226 Closing data connection, file transfer successful");
                     ControlWriter.Flush();
                 }
@@ -755,7 +793,7 @@ namespace NovaFTP
             {
                 try
                 {
-                    user.LogMsg("550 Closing data connection, file transfer failed successfully");
+                    LogUser.LogMsg("550 Closing data connection, file transfer failed successfully");
                     ControlWriter.WriteLine("550 Closing data connection, file transfer failed successfully");
                     ControlWriter.Flush();
                 }
@@ -810,7 +848,7 @@ namespace NovaFTP
             DataActive.Close();
             DataActive = null;
 
-            user.LogMsg("226 Closing data connection, file transfer successful");
+            LogUser.LogMsg("226 Closing data connection, file transfer successful");
             ControlWriter.WriteLine("226 Closing data connection, file transfer successful");
             ControlWriter.Flush();
         }
@@ -873,7 +911,7 @@ namespace NovaFTP
             DataActive.Close();
             DataActive = null;
 
-            user.LogMsg("226 MLSD complete");
+            LogUser.LogMsg("226 MLSD complete");
             ControlWriter.WriteLine("226 MLSD complete");
             ControlWriter.Flush();
         }
@@ -931,7 +969,7 @@ namespace NovaFTP
             DataActive.Close();
             DataActive = null;
 
-            user.LogMsg("226 NLST complete");
+            LogUser.LogMsg("226 NLST complete");
             ControlWriter.WriteLine("226 NLST complete");
             ControlWriter.Flush();
         }
